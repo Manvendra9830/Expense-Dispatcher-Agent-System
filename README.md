@@ -27,41 +27,43 @@ An end-to-end receipt extraction application that ingests receipt images and PDF
 
 ```mermaid
 flowchart TD
-    subgraph Frontend["Streamlit Frontend (Port 8501)"]
-        UI["Dashboard & Upload Interface"]
-        History["Receipt History & Inspection View"]
+    subgraph Frontend["Streamlit Frontend"]
+        Dashboard["Dashboard"]
+        Upload["Receipt Upload"]
+        History["Receipt History"]
     end
 
-    subgraph Backend["FastAPI Backend (Port 8000)"]
-        Routes["REST API Routes (/upload, /receipts, /stats)"]
-        FileProc["File Processing Layer (Pillow & PyMuPDF)"]
-        
-        subgraph HybridEngine["Hybrid Extraction Engine"]
-            OCR["Local EasyOCR Engine"]
-            LLM["OpenRouter Vision LLM"]
-        end
-        
-        JSON["Structured JSON Extraction"]
-        Validation["Pydantic & Business Validation"]
+    subgraph Backend["FastAPI Backend"]
+        Routes["REST API Routes"]
+        FileProc["File Processing"]
     end
 
-    subgraph Database["SQLite Database (SQLAlchemy ORM)"]
-        ReceiptsTable[("receipts table")]
-        ItemsTable[("receipt_items table")]
+    subgraph Engine["Hybrid Extraction Engine"]
+        EasyOCR["Local EasyOCR"]
+        VisionLLM["OpenRouter Vision LLM"]
     end
 
-    UI -->|Multipart Upload HTTP POST| Routes
+    JSON["Structured JSON Extraction"]
+    Validation["Pydantic and Business Validation"]
+
+    subgraph Database["SQLite Database"]
+        Receipts["Receipts Table"]
+        ReceiptItems["Receipt Items Table"]
+    end
+
+    Upload --> Routes
     Routes --> FileProc
-    FileProc --> OCR
-    FileProc --> LLM
-    OCR -->|OCR Text Context| LLM
-    LLM --> JSON
+    FileProc --> EasyOCR
+    FileProc --> VisionLLM
+    EasyOCR --> VisionLLM
+    VisionLLM --> JSON
     JSON --> Validation
-    Validation -->|Persist Transaction| ReceiptsTable
-    Validation -->|Persist Line Items| ItemsTable
-    ReceiptsTable -.->|Query History & Stats| Routes
-    Routes -.->|JSON Response| UI
-    Routes -.->|JSON Response| History
+    Validation --> Receipts
+    Validation --> ReceiptItems
+    Receipts --> Routes
+    ReceiptItems --> Routes
+    Routes --> Dashboard
+    Routes --> History
 ```
 
 ---
@@ -366,27 +368,27 @@ The application persists data in SQLite via SQLAlchemy ORM models configured wit
 
 ```mermaid
 erDiagram
-    RECEIPTS ||--o{ RECEIPT_ITEMS : "has line items"
+    RECEIPTS ||--o{ RECEIPT_ITEMS : contains
     RECEIPTS {
         int id PK
         string filename
         string file_path
         string merchant_name
-        date date
-        numeric subtotal
-        numeric tax
-        numeric tip
-        numeric total_amount
-        text extracted_json
-        text raw_ocr_text
+        string date
+        float subtotal
+        float tax
+        float tip
+        float total_amount
+        string extracted_json
+        string raw_ocr_text
         string status
-        datetime created_at
+        string created_at
     }
     RECEIPT_ITEMS {
         int id PK
         int receipt_id FK
         string item_name
-        numeric price
+        float price
     }
 ```
 
