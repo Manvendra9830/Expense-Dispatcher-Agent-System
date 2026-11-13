@@ -1,0 +1,39 @@
+# Web Framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Frontend
+streamlit==1.41.1
+
+# HTTP Client
+httpx==0.28.1
+
+# OCR
+easyocr==1.7.2
+
+# Image Processing
+Pillow==11.1.0
+
+# PDF Processing
+PyMuPDF==1.25.3
+
+# Validation
+pydantic==2.10.5
+
+# Database
+SQLAlchemy==2.0.37
+
+# Configuration
+python-dotenv==1.0.1
+
+# Utilities
+python-multipart==0.0.20
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.2
+httpx  # also used for TestClient
+
+# Type stubs (dev)
+aiofiles==24.1.0
+
