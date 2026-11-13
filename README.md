@@ -528,16 +528,306 @@ tests/test_validation.py .....................            [ 21 passed ]
 
 ---
 
-## 🔮 Future Scope – Part 2: Multi-Agent Expense Dispatcher
+## 🤖 Part 2: Multi-Agent Architecture Design
 
-The Part 1 architecture has been designed from the ground up to allow seamless integration of Part 2 without altering the existing extraction pipeline:
+> **Assessment Context & Implementation Status**:  
+> This section addresses **Option B** of the Paxcom technical assessment.  
+> - **Part 1 (Phases 1, 2, and 2.1)** is **fully implemented, tested (99 tests passing), and operational**.  
+> - **Part 2** is an **architecture and system design proposal ONLY**. It specifies the end-to-end technical blueprint for extending the system into an automated multi-agent expense analysis, reporting, and email distribution workflow. No Part 2 application code or automated agents have been implemented at this stage.
 
-- **Expense Categorization Agent**: Automatically classifies extracted line items into corporate expense categories (Meals, Travel, Supplies, Software).
-- **Summary & Analytics Agent**: Synthesizes periodic executive expense reports, budget trend alerts, and policy compliance summaries.
-- **Excel Recipient Reader**: Reads recipient distribution lists and department budget mappings from Excel workbooks.
-- **Email Dispatcher**: Connects to SMTP/Gmail services to distribute approved expense summaries and receipt attachments to stakeholders.
+---
 
-> **Status**: Part 1 (including Phase 2 & 2.1 reliability enhancements) is fully implemented and operational. Part 2 multi-agent dispatching remains planned for a future phase.
+### 1. Problem Statement and Objectives
+
+While Part 1 successfully solves the problem of ingesting receipts, extracting text via OCR, reasoning with Vision LLMs, validating schema rules, and storing structured financial records in SQLite, real-world finance teams require automated downstream workflows:
+
+1. **Automated Expense Intelligence**: Moving beyond raw receipt rows by categorizing line items (Meals, Transportation, Supplies, Fuel), detecting spending trends, and computing tax liabilities.
+2. **Consolidated Executive Reporting**: Synthesizing dozens of individual receipts into structured, professional HTML/PDF expense reports suitable for management review.
+3. **Dynamic Recipient Routing**: Decoupling hardcoded email targets by reading authorized distribution lists dynamically from corporate spreadsheets (`.xlsx`).
+4. **Secure, Human-Gated Email Dispatch**: Transmitting finalized reports via authenticated SMTP while enforcing strict human approval before any external communication leaves the system.
+5. **Auditability and State Tracking**: Logging dispatch attempts, SMTP response codes, recipient timestamps, and idempotency tokens to eliminate duplicate payouts and unverified deliveries.
+
+---
+
+### 2. High-Level System Architecture
+
+The architecture below illustrates how the proposed Part 2 multi-agent system integrates with the existing Part 1 foundation. **Crucially, Part 2 consumes already-validated structured receipt records and line items from the SQLite database, completely bypassing the need to re-run OCR or vision inference on original receipt files.**
+
+```mermaid
+flowchart TD
+    subgraph Part1["Part 1: Receipt Extraction Foundation (Implemented)"]
+        StreamlitUI["Streamlit Frontend"]
+        FastAPIBackend["FastAPI Backend"]
+        SQLiteDB[("SQLite Database (receipts.db)")]
+        StreamlitUI --> FastAPIBackend
+        FastAPIBackend --> SQLiteDB
+    end
+
+    subgraph Part2["Part 2: Multi-Agent Expense Dispatcher (Proposed Architecture)"]
+        DispatcherUI["Expense Dispatcher UI (Streamlit)"]
+        Orchestrator["Workflow Orchestrator"]
+        AnalysisAgent["Expense Analysis Agent"]
+        SummaryAgent["Expense Summary Agent"]
+        RecipientAgent["Recipient Management Agent"]
+        ExcelFile[("Excel Recipient File (.xlsx)")]
+        ReportModule["Report Generator (HTML/PDF)"]
+        DispatchAgent["Email Dispatch Agent"]
+        AuditDB[("Delivery & Audit Log (SQLite)")]
+        GmailSMTP["Gmail SMTP Server (TLS Port 587)"]
+    end
+
+    SQLiteDB -- "Structured Records (JSON/ORM)" --> AnalysisAgent
+    DispatcherUI -- "Trigger Workflow" --> Orchestrator
+    Orchestrator --> AnalysisAgent
+    AnalysisAgent -- "Categorized Data" --> SummaryAgent
+    SummaryAgent --> ReportModule
+    ExcelFile --> RecipientAgent
+    RecipientAgent -- "Validated Recipients" --> Orchestrator
+    ReportModule -- "Report Preview" --> DispatcherUI
+    DispatcherUI -- "Human Approval Granted" --> Orchestrator
+    Orchestrator --> DispatchAgent
+    DispatchAgent --> GmailSMTP
+    DispatchAgent --> AuditDB
+    AuditDB --> DispatcherUI
+```
+
+---
+
+### 3. Individual Agent Responsibilities
+
+The proposed architecture adopts a specialized, modular agent model where each agent owns a bounded context with clear inputs, strict deterministic guarantees, and structured outputs.
+
+```mermaid
+flowchart LR
+    A["Workflow Orchestrator"] --> B["Expense Analysis Agent"]
+    B --> C["Expense Summary Agent"]
+    A --> D["Recipient Management Agent"]
+    C --> E["Human Approval Gate"]
+    D --> E
+    E --> F["Email Dispatch Agent"]
+```
+
+#### A. Workflow Orchestrator
+- **Role**: Central controller managing state transitions, agent execution ordering, and error boundaries.
+- **Responsibilities**:
+  - Accepts user execution triggers via the Streamlit dashboard (e.g., date-range selection or batch receipt ID lists).
+  - Maintains the workflow state machine (`IDLE` → `ANALYZING` → `SUMMARIZING` → `RESOLVING_RECIPIENTS` → `AWAITING_APPROVAL` → `DISPATCHING` → `COMPLETED` / `FAILED`).
+  - Passes validated, typed Python data structures between agents (eliminating untyped string passing).
+  - Coordinates the mandatory **Human-in-the-Loop Approval Gate** before email transmission.
+  - Handles timeout exceptions, agent retries, and rollback transitions upon partial failures.
+
+#### B. Expense Analysis Agent
+- **Role**: Data retrieval, financial categorization, and merchant grouping.
+- **Responsibilities**:
+  - Queries `receipts.db` for records with `status = 'COMPLETED'` within the user's selected scope.
+  - Extracts structured fields: merchant name, transaction date, line items, subtotal, tax, tip, and total amount.
+  - Categorizes expenditure into standard corporate buckets:
+    - `Meals & Dining` (e.g., The Corner Bistro)
+    - `Retail & Office Supplies` (e.g., Target Stores)
+    - `Fuel & Automobile` (e.g., Quick-Mart Fuel)
+    - `Software & Subscriptions`
+    - `Travel & Lodging`
+    - `Miscellaneous`
+  - Groups line items and merchant summaries into aggregate category totals.
+  - **Deterministic Guarantee**: All arithmetic, category summations, and tax aggregations are executed using Python's `decimal.Decimal` module to prevent floating-point drift. A free OpenRouter text LLM is invoked strictly as a classifier for ambiguous merchant descriptions, never for arithmetic calculations.
+
+#### C. Expense Summary Agent
+- **Role**: Synthesis of executive summaries and formal document rendering.
+- **Responsibilities**:
+  - Receives normalized financial data from the Expense Analysis Agent.
+  - Computes top spending categories, average receipt ticket size, and date-range span.
+  - Generates clear, executive-ready textual observations (e.g., highlighting that Meals comprised 65% of monthly expenditure).
+  - Compiles an HTML template styled with corporate CSS tables, responsive line-item grids, and category badges.
+  - Optionally converts the compiled HTML into an attached PDF document (via `WeasyPrint` or `pdfkit`) for formal distribution.
+
+#### D. Recipient Management Agent
+- **Role**: Excel ingestion, schema validation, and recipient authorization.
+- **Responsibilities**:
+  - Reads the local recipient configuration file (`recipients.xlsx`) using `pandas` and `openpyxl`.
+  - Enforces schema integrity, checking for mandatory columns: `recipient_name`, `email`, `department`, `active`.
+  - Validates RFC-compliant email formatting using regular expressions.
+  - Filters active distribution members (`active == "Yes"`).
+  - **Sample Excel Recipient Schema**:
+
+    | recipient_name | email | department | active |
+    |---|---|---|---|
+    | Finance Operations | finance@example.com | Finance | Yes |
+    | Department Manager | manager@example.com | Operations | Yes |
+    | Audit & Compliance | audit@example.com | Accounting | No |
+
+  > **Important Architecture Note on Expense Routing**:  
+  > The Part 1 database architecture captures transactional receipt data (merchant, amounts, line items, taxes) and does not currently maintain an `employee_id` or department owner on uploaded receipts. Therefore, the proposed Part 2 system targets **consolidated company-wide or batch expense reports routed to designated corporate finance recipients**. Individual employee-level routing represents a future extension that will require associating uploaded receipts with user/employee metadata.
+
+#### E. Email Dispatch Agent
+- **Role**: Secure SMTP communication, payload construction, and delivery auditing.
+- **Responsibilities**:
+  - Assembles multipart MIME email payloads containing:
+    - Subject line: `[Expense Report] Consolidated Summary - {Date Range} - {Total Amount}`
+    - Formatted HTML email body containing the summary KPI table.
+    - Attached PDF or standalone HTML expense report file.
+  - Connects to Google's SMTP servers (`smtp.gmail.com:587`) using explicit `STARTTLS` encryption.
+  - Authenticates securely via a dedicated 16-character **Gmail App Password** stored in `.env`.
+  - Logs dispatch results (recipient email, timestamp, status code, idempotency hash) into a persistent `expense_dispatches` audit table.
+  - Implements controlled exponential backoff retries for transient SMTP network timeouts.
+  - Guarantees **idempotency**: computes a SHA-256 hash of the report payload to prevent duplicate email transmissions for the same batch.
+
+---
+
+### 4. Agent Communication and Data Flow
+
+The multi-agent workflow operates as a deterministic pipeline orchestrated by the central controller:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User (Streamlit)
+    participant Orch as Workflow Orchestrator
+    participant Analysis as Expense Analysis Agent
+    participant DB as SQLite (receipts.db)
+    participant Summary as Expense Summary Agent
+    participant Recipient as Recipient Management Agent
+    participant Excel as recipients.xlsx
+    participant Dispatch as Email Dispatch Agent
+    participant SMTP as Gmail SMTP
+
+    User->>Orch: Click "Generate & Dispatch Expense Report"
+    Orch->>Analysis: execute_analysis(filter_criteria)
+    Analysis->>DB: SELECT * FROM receipts WHERE status='COMPLETED'
+    DB-->>Analysis: List of Receipt ORM rows & line items
+    Analysis-->>Orch: AnalysisResult (Categorized JSON & Totals)
+
+    Orch->>Summary: generate_summary(AnalysisResult)
+    Summary-->>Orch: SummaryReport (HTML/PDF artifact & metrics)
+
+    Orch->>Recipient: resolve_recipients(excel_path)
+    Recipient->>Excel: Read recipients.xlsx
+    Excel-->>Recipient: DataFrame
+    Recipient-->>Orch: List of validated active emails
+
+    Orch-->>User: Display Report Preview & Recipient List in UI
+    Note over User,Orch: Human-in-the-Loop Review Gate
+
+    alt User Rejects
+        User->>Orch: Reject / Cancel Dispatch
+        Orch-->>User: Workflow Aborted (Status: CANCELLED)
+    else User Approves
+        User->>Orch: Approve Dispatch
+        Orch->>Dispatch: send_report(SummaryReport, Recipients)
+        Dispatch->>SMTP: Connect STARTTLS, Authenticate & Send
+        SMTP-->>Dispatch: 250 OK (Message Accepted)
+        Dispatch->>DB: INSERT INTO expense_dispatches (status, timestamp)
+        Dispatch-->>Orch: DispatchResult (Success, 2 recipients)
+        Orch-->>User: Display Success Confirmation & Audit Record
+    end
+```
+
+#### Illustrative Agent-to-Agent JSON Payload
+Between the Expense Analysis Agent and the Summary Agent, structured data is exchanged as validated Python dataclasses / Pydantic models:
+
+```json
+{
+  "batch_id": "exp-batch-2026-02-B1",
+  "total_receipts": 3,
+  "date_range": {
+    "start_date": "2026-02-18",
+    "end_date": "2026-02-20"
+  },
+  "financial_totals": {
+    "subtotal": 201.48,
+    "tax": 14.88,
+    "tip": 15.00,
+    "grand_total": 231.36
+  },
+  "category_breakdown": [
+    {
+      "category": "Meals & Dining",
+      "amount": 99.48,
+      "percentage": 43.0,
+      "receipt_count": 1,
+      "merchants": ["THE CORNER BISTRO"]
+    },
+    {
+      "category": "Retail & Supplies",
+      "amount": 50.31,
+      "percentage": 21.7,
+      "receipt_count": 1,
+      "merchants": ["TARGET STORES"]
+    },
+    {
+      "category": "Fuel & Automotive",
+      "amount": 44.07,
+      "percentage": 19.1,
+      "receipt_count": 1,
+      "merchants": ["QUICK-MART FUEL & MORE"]
+    }
+  ],
+  "discrepancy_flags": [],
+  "generated_at": "2026-02-21T10:00:00Z"
+}
+```
+
+---
+
+### 5. Proposed Technology Stack vs. Current Implementation
+
+| Architectural Layer | Part 1 / Phase 2 (Currently Implemented) | Part 2 Multi-Agent Dispatcher (Proposed Design) |
+|---|---|---|
+| **Frontend UI** | Streamlit (KPIs, file upload, receipt history) | Streamlit Extension (Expense Dispatcher tab, preview, approve button) |
+| **Backend API** | FastAPI (REST routes `/upload`, `/receipts`, `/stats`) | FastAPI Service Endpoints (`/reports/generate`, `/reports/dispatch`) |
+| **Agent Orchestration**| Procedural pipeline in `extraction_service.py` | **Custom Python Agent Coordinator** (Clean dataclasses & state machine) |
+| **AI Reasoning** | OpenRouter Vision LLMs (`nemotron`, `gemma`, `particle`) | Optional OpenRouter free LLM strictly for text categorization assistance |
+| **Database** | SQLite (`receipts`, `receipt_items`) | SQLite Extension (Add `expense_dispatches` audit table) |
+| **Spreadsheet Ingestion**| Not required | `pandas` (2.2+) and `openpyxl` (3.1+) |
+| **Report Generation** | In-browser Markdown tables & JSON tree | HTML5 Jinja2 Templates + Optional `WeasyPrint` for vector PDF |
+| **Email Protocol** | None | Python `smtplib` + `email.mime` via Gmail SMTP (TLS port 587) |
+| **Configuration** | `python-dotenv` (API keys, ports, models) | `python-dotenv` (Add `GMAIL_SMTP_USER`, `GMAIL_APP_PASSWORD`) |
+
+#### Rationale for Custom Python Agents vs. Heavyweight Frameworks
+Instead of introducing complex frameworks such as **LangChain**, **CrewAI**, or **AutoGen**, Part 2 proposes a **custom Python functional agent architecture**:
+1. **Zero Framework Bloat**: Avoids thousands of transitive dependencies, frequent breaking changes, and opaque abstractions.
+2. **Deterministic Financial Accuracy**: LangChain/CrewAI multi-agent "chat rooms" are prone to arithmetic hallucinations; pure Python functions guarantee 100% mathematical precision.
+3. **Low Latency & Zero Unnecessary Tokens**: Framework agents spend hundreds of reasoning tokens merely delegating to each other; direct Python function composition is instantaneous and free.
+4. **Transparent Debugging**: Standard Python exceptions, stack traces, and deterministic unit testing with Pytest.
+
+---
+
+### 6. Error Handling and Security Architecture
+
+#### Graceful Degradation Matrix
+
+| Failure Mode | Detection Point | Handling Strategy |
+|---|---|---|
+| **No Eligible Receipts** | Analysis Agent startup | Workflow terminates gracefully with user warning: `"No completed receipts found for the selected period."` |
+| **Uncategorized Item** | Analysis Agent | Item falls back to `'Miscellaneous'` category; flagged in report for accountant review. |
+| **Missing Excel File** | Recipient Agent | Halts dispatch process; alerts user with expected spreadsheet path (`./recipients.xlsx`). |
+| **Invalid Email Format** | Recipient Agent | Regex flags malformed email; excludes row from active list; warns user in preview UI. |
+| **Report Compilation Error**| Summary Agent | Aborts workflow; sends zero emails; surfaces rendering error logs in Streamlit. |
+| **SMTP Authentication Failure**| Dispatch Agent | Traps `SMTPAuthenticationError`; logs message; instructs admin to verify `.env` App Password. |
+| **Transient Network Drop**| Dispatch Agent | Retries connection up to 3 times with exponential backoff (`2s`, `4s`, `8s`). |
+| **Duplicate Dispatch Attempt**| Dispatch Agent | Checks SHA-256 batch signature against `expense_dispatches`; halts if already dispatched today. |
+
+#### Security Best Practices
+1. **Credential Isolation**: SMTP user credentials and Gmail App Passwords reside exclusively in `.env` and are loaded through the existing centralized `config.py` module. Never committed to version control.
+2. **Mandatory Human-in-the-Loop Gate**: Autonomous agents prepare analysis, render reports, and draft recipient lists, but **cannot send emails autonomously**. A visible, physical user button in Streamlit (`"Approve & Dispatch"`) must be clicked by an authorized human operator.
+3. **Strict Recipient Whitelisting**: The Recipient Agent only delivers to email addresses explicitly configured with `active == "Yes"` in the local Excel file.
+
+---
+
+### 7. Planned Future Enhancements (Post-Part 2 Roadmap)
+
+The following capabilities represent advanced potential extensions once the core Part 2 architecture is realized:
+- **Employee-Wise Expense Association**: Extending the SQLite schema with an `employee_id` and `employee_email` foreign key to allow personalized employee reimbursement summaries.
+- **Department Budget Tracking**: Cross-referencing monthly category totals against pre-configured department budgets to generate automated over-budget warnings.
+- **Scheduled Background Automations**: Configuring a headless cron scheduler (e.g. `APScheduler`) to generate and stage month-end expense reports automatically.
+- **Expense Anomaly Detection**: Implementing statistical z-score or IQR outlier models to detect duplicate receipts or abnormal weekend purchases.
+- **Multi-Provider Email Adapter**: Abstracting the email agent to support enterprise API providers (SendGrid, AWS SES, Resend) in addition to Gmail SMTP.
+
+---
+
+## 🔮 Future Scope Summary
+
+- **Part 1 (Phases 1, 2, and 2.1)**: **100% Complete & Operational** (Receipt Ingestion, EasyOCR local caching, OpenRouter multi-model fallback, discrepancy detection, strict date validation, SQLite persistence, Streamlit UI, 99 tests passing).
+- **Part 2 (Multi-Agent Expense Dispatcher)**: **Architectural Design Proposal Complete** (Option B Paxcom assessment requirement; detailed above for future implementation).
 
 ---
 
