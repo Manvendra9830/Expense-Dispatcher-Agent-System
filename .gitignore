@@ -1,29 +1,15 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
+# Python environment
 .venv/
 venv/
 ENV/
 
-# Environment variables
+# Environment secrets
 .env
 
-# Database files
-*.db
-*.sqlite
-*.sqlite3
-
-# Uploads
-uploads/*
-!uploads/.gitkeep
-backend/uploads/*
-!backend/uploads/.gitkeep
-
-# Logs
-*.log
+# Python cache & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
 
 # Testing
 .pytest_cache/
@@ -31,6 +17,33 @@ backend/uploads/*
 .ruff_cache/
 htmlcov/
 .coverage
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded receipts
+uploads/*
+!uploads/.gitkeep
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Local receipt files (ignore raw receipts except demonstration images)
+Receipts/*
+!Receipts/Receipt 1.png
+!Receipts/Receipt 2.png
+receipts/*
+!receipts/Receipt 1.png
+!receipts/Receipt 2.png
+
+# EasyOCR model weights & caches
+~/.EasyOCR/
+model/
+models/easyocr/
+
+# Logs
+*.log
 
 # IDE
 .vscode/
@@ -42,18 +55,10 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# EasyOCR model cache
-~/.EasyOCR/
-model/
-
-# Distribution
+# Distribution & build
 dist/
 build/
 *.egg-info/
 
-# Misc
-*.pdf
-*.png
-*.jpg
-*.jpeg
-
+# Assessment reference documents
+Take home assessment*.pdf
