@@ -2,11 +2,13 @@
 Database repository module.
 
 Data access layer for receipt CRUD operations.
+Supports Phase 2 metadata tracking (model_used, extraction_method, fallback details, duration).
 """
 
 import json
 from datetime import date
 from decimal import Decimal
+from typing import Optional
 
 from sqlalchemy.orm import Session
 
@@ -25,6 +27,11 @@ def create_receipt(
     extraction: ReceiptExtraction,
     raw_ocr_text: str,
     status: str = "COMPLETED",
+    model_used: Optional[str] = None,
+    extraction_method: Optional[str] = "AI",
+    fallback_used: bool = False,
+    fallback_reason: Optional[str] = None,
+    processing_duration_ms: Optional[int] = None,
 ) -> Receipt:
     """
     Create a new receipt record with its line items.
@@ -36,6 +43,11 @@ def create_receipt(
         extraction: Validated extraction data.
         raw_ocr_text: Raw OCR text output.
         status: Processing status.
+        model_used: Specific AI model used, if any.
+        extraction_method: "AI" or "LOCAL_OCR".
+        fallback_used: True if fallback was triggered.
+        fallback_reason: Description of why fallback occurred.
+        processing_duration_ms: Total pipeline duration in milliseconds.
 
     Returns:
         Created Receipt instance.
@@ -65,6 +77,11 @@ def create_receipt(
             extracted_json=extraction.model_dump_json(),
             raw_ocr_text=raw_ocr_text,
             status=status,
+            model_used=model_used,
+            extraction_method=extraction_method,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            processing_duration_ms=processing_duration_ms,
         )
 
         # Add line items
@@ -79,7 +96,10 @@ def create_receipt(
         db.add(receipt)
         db.commit()
         db.refresh(receipt)
-        logger.info(f"Receipt created with ID {receipt.id}")
+        logger.info(
+            f"Receipt created with ID {receipt.id} (method={extraction_method}, "
+            f"model={model_used}, fallback={fallback_used}, status={status})"
+        )
         return receipt
 
     except Exception as e:
@@ -95,20 +115,14 @@ def create_failed_receipt(
     raw_ocr_text: str | None = None,
     status: str = "FAILED",
     extracted_json: str | None = None,
+    model_used: Optional[str] = None,
+    extraction_method: Optional[str] = "AI",
+    fallback_used: bool = False,
+    fallback_reason: Optional[str] = None,
+    processing_duration_ms: Optional[int] = None,
 ) -> Receipt:
     """
     Create a receipt record for a failed or review-required extraction.
-
-    Args:
-        db: Database session.
-        filename: Original uploaded filename.
-        file_path: Server-side file path.
-        raw_ocr_text: Raw OCR text if available.
-        status: Processing status (FAILED or REVIEW_REQUIRED).
-        extracted_json: Partial extraction JSON if available.
-
-    Returns:
-        Created Receipt instance.
     """
     try:
         receipt = Receipt(
@@ -117,6 +131,11 @@ def create_failed_receipt(
             raw_ocr_text=raw_ocr_text,
             status=status,
             extracted_json=extracted_json,
+            model_used=model_used,
+            extraction_method=extraction_method,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            processing_duration_ms=processing_duration_ms,
         )
         db.add(receipt)
         db.commit()
@@ -235,4 +254,3 @@ def get_receipt_stats(db: Session) -> dict:
         "successful_extractions": successful,
         "review_required": review_required,
     }
-

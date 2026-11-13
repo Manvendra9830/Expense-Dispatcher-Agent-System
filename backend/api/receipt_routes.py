@@ -2,6 +2,7 @@
 FastAPI receipt routes.
 
 REST API endpoints for receipt upload, retrieval, and deletion.
+Includes Phase 2 metadata observability (model_used, extraction_method, fallback details).
 """
 
 import json
@@ -35,15 +36,15 @@ router = APIRouter()
 
 def _receipt_to_response(receipt) -> ReceiptResponse:
     """Convert a Receipt ORM model to a ReceiptResponse schema."""
-    # Parse line items from the relationship
     line_items = []
     for item in receipt.line_items:
-        line_items.append(LineItem(
-            item_name=item.item_name,
-            price=str(item.price) if item.price is not None else None,
-        ))
+        line_items.append(
+            LineItem(
+                item_name=item.item_name,
+                price=str(item.price) if item.price is not None else None,
+            )
+        )
 
-    # Parse warnings from extracted_json
     warnings = []
     if receipt.extracted_json:
         try:
@@ -66,6 +67,11 @@ def _receipt_to_response(receipt) -> ReceiptResponse:
         warnings=warnings,
         raw_ocr_text=receipt.raw_ocr_text,
         created_at=receipt.created_at.isoformat() if receipt.created_at else None,
+        model_used=receipt.model_used,
+        extraction_method=receipt.extraction_method or "AI",
+        fallback_used=bool(receipt.fallback_used),
+        fallback_reason=receipt.fallback_reason,
+        processing_duration_ms=receipt.processing_duration_ms,
     )
 
 
@@ -78,18 +84,15 @@ async def upload_receipt(
     Upload and process a receipt image or PDF.
 
     Accepts PNG, JPG, JPEG, and PDF files. Processes the file through
-    OCR and LLM extraction, validates the result, and stores it.
-
-    Returns the structured extraction result.
+    OCR and Vision LLM (with fallback to local OCR if needed), validates the result,
+    and stores it in SQLite.
     """
     try:
-        # Read file content
         content = await file.read()
         filename = file.filename or "unknown"
 
         logger.info(f"Received upload: {filename} ({len(content)} bytes)")
 
-        # Process through the extraction pipeline
         receipt = process_receipt(
             filename=filename,
             content=content,
@@ -124,15 +127,20 @@ async def list_receipts(
         receipts = get_all_receipts(db, limit=limit, offset=offset)
         result = []
         for r in receipts:
-            result.append(ReceiptListItem(
-                id=r.id,
-                filename=r.filename,
-                merchant_name=r.merchant_name,
-                date=r.date.isoformat() if r.date else None,
-                total_amount=float(r.total_amount) if r.total_amount is not None else None,
-                status=r.status,
-                created_at=r.created_at.isoformat() if r.created_at else None,
-            ))
+            result.append(
+                ReceiptListItem(
+                    id=r.id,
+                    filename=r.filename,
+                    merchant_name=r.merchant_name,
+                    date=r.date.isoformat() if r.date else None,
+                    total_amount=float(r.total_amount) if r.total_amount is not None else None,
+                    status=r.status,
+                    created_at=r.created_at.isoformat() if r.created_at else None,
+                    model_used=r.model_used,
+                    extraction_method=r.extraction_method or "AI",
+                    fallback_used=bool(r.fallback_used),
+                )
+            )
         return result
     except Exception as e:
         logger.error(f"Error listing receipts: {e}")
@@ -145,7 +153,7 @@ async def get_receipt(
     db: Session = Depends(get_db),
 ):
     """
-    Get a single receipt with full extracted information and line items.
+    Get a single receipt with full extracted information, metadata, and line items.
     """
     try:
         receipt = get_receipt_by_id(db, receipt_id)
@@ -189,4 +197,3 @@ async def dashboard_stats(
     except Exception as e:
         logger.error(f"Error fetching stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve statistics.")
-

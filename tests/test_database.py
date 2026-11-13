@@ -2,6 +2,7 @@
 Tests for database operations.
 
 Uses a temporary SQLite database for isolation.
+Includes tests for Phase 2 metadata tracking and automated schema migration.
 """
 
 import pytest
@@ -10,7 +11,7 @@ from decimal import Decimal
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.database.connection import Base
+from backend.database.connection import Base, migrate_db
 from backend.database.models import Receipt, ReceiptItem
 from backend.database.repository import (
     create_receipt,
@@ -78,6 +79,10 @@ class TestCreateReceipt:
             extraction=sample_extraction,
             raw_ocr_text="Test OCR output text",
             status="COMPLETED",
+            model_used="nvidia/nemotron-3.5-super-vl:free",
+            extraction_method="AI",
+            fallback_used=False,
+            processing_duration_ms=1250,
         )
 
         assert receipt.id is not None
@@ -85,9 +90,36 @@ class TestCreateReceipt:
         assert receipt.merchant_name == "Test Mart"
         assert receipt.total_amount == Decimal("22.13")
         assert receipt.status == "COMPLETED"
+        assert receipt.model_used == "nvidia/nemotron-3.5-super-vl:free"
+        assert receipt.extraction_method == "AI"
+        assert receipt.fallback_used is False
+        assert receipt.processing_duration_ms == 1250
         assert len(receipt.line_items) == 2
         assert receipt.line_items[0].item_name == "Widget A"
         assert receipt.line_items[0].price == Decimal("12.99")
+
+    def test_create_receipt_with_fallback_metadata(self, db, sample_extraction):
+        """Receipt with fallback metadata should be stored correctly."""
+        receipt = create_receipt(
+            db=db,
+            filename="fallback.png",
+            file_path="/uploads/fallback.png",
+            extraction=sample_extraction,
+            raw_ocr_text="Raw OCR",
+            status="REVIEW_REQUIRED",
+            model_used=None,
+            extraction_method="LOCAL_OCR",
+            fallback_used=True,
+            fallback_reason="AI rate limit reached",
+            processing_duration_ms=450,
+        )
+
+        assert receipt.id is not None
+        assert receipt.extraction_method == "LOCAL_OCR"
+        assert receipt.model_used is None
+        assert receipt.fallback_used is True
+        assert receipt.fallback_reason == "AI rate limit reached"
+        assert receipt.processing_duration_ms == 450
 
     def test_create_receipt_nullable_fields(self, db):
         """Receipt with all nullable fields should be created."""
@@ -123,10 +155,12 @@ class TestCreateFailedReceipt:
             file_path="/uploads/bad_receipt.pdf",
             raw_ocr_text="Some OCR text",
             status="FAILED",
+            fallback_reason="Preprocessing failed",
         )
         assert receipt.id is not None
         assert receipt.status == "FAILED"
         assert receipt.merchant_name is None
+        assert receipt.fallback_reason == "Preprocessing failed"
 
     def test_create_review_required_receipt(self, db):
         """Review-required receipt should have correct status."""
@@ -220,3 +254,11 @@ class TestReceiptStats:
         assert stats["review_required"] == 1
         assert stats["total_expenses"] == pytest.approx(44.26, rel=1e-2)
 
+
+class TestDatabaseMigration:
+    """Tests for automated database migration."""
+
+    def test_migrate_db_safe_on_existing_schema(self):
+        """Calling migrate_db should be idempotent and not fail."""
+        migrate_db(target_engine=test_engine)
+        migrate_db(target_engine=test_engine)

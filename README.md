@@ -1,8 +1,10 @@
 # 🧾 Expense Dispatcher Agent System
 
-**Part 1: AI-Powered Receipt Extraction System**
+**Part 1: AI-Powered Receipt Extraction System (Phase 1 & Phase 2 Enhanced)**
 
 An end-to-end receipt extraction application that ingests receipt images and PDFs, processes them via local OCR (EasyOCR) and a Vision Large Language Model (OpenRouter), validates the extracted data using strict Pydantic schemas and business logic rules, stores the structured records in a local SQLite database, and presents actionable insights through a Streamlit dashboard.
+
+Phase 2 introduces **performance optimizations, persistent model caching, proactive quota monitoring, multi-model free Vision LLM fallback, and a zero-network local OCR fallback parser** to guarantee resilient zero-cost extraction under all network and API conditions.
 
 > **Note on Architecture Roadmap**: This repository represents **Part 1 (Receipt Extraction System)** of the overall Expense Dispatcher Agent System. Part 2 will introduce an autonomous Multi-Agent Expense Dispatcher (Expense Agent, Summary Agent, Excel Recipient Reader, and Email Dispatcher) without requiring major structural changes to this foundational pipeline.
 
@@ -10,9 +12,10 @@ An end-to-end receipt extraction application that ingests receipt images and PDF
 
 ## ✨ Features
 
+### Phase 1 Core Pipeline
 - **Multi-Format Receipt Ingestion**: Accepts receipt images (`PNG`, `JPG`, `JPEG`) and documents (`PDF`).
 - **File Validation & Preprocessing**: Performs MIME verification, file size checks (up to 10 MB), PDF page bounds (up to 5 pages), integrity validation, EXIF orientation correction, RGB conversion, and high-DPI PDF page rasterization.
-- **EasyOCR Local Text Extraction**: Offline OCR text detection and recognition running locally via a singleton reader pattern, minimizing unnecessary network traffic.
+- **EasyOCR Local Text Extraction**: Offline OCR text detection and recognition running locally via a singleton reader pattern, eliminating unnecessary network dependencies.
 - **OpenRouter Vision LLM Integration**: Leverages Vision LLMs on OpenRouter with base64-encoded receipt imagery and OCR text for accurate structured understanding.
 - **Hybrid OCR + Vision Extraction**: Cross-references local OCR text against visual receipt features to extract merchant name, transaction date, line items, subtotal, tax, tip, and total.
 - **Self-Healing LLM Retry Pipeline**: If initial JSON parsing or Pydantic validation fails, the service retries the model with validation feedback before setting status to `REVIEW_REQUIRED`.
@@ -21,6 +24,15 @@ An end-to-end receipt extraction application that ingests receipt images and PDF
 - **Streamlit Frontend Dashboard**: Real-time KPI summary (Total Receipts, Total Expenses, Successful Extractions, Review Required), drag-and-drop receipt processor with synchronous feedback, line item tables, and a full history explorer.
 - **Robust Error Handling**: Structured exception hierarchies with sanitized user-facing error messages and controlled exponential backoff for API rate limits.
 
+### Phase 2 Reliability & Performance Enhancements
+- **Persistent Local EasyOCR Caching**: Pre-download utility (`setup_models.py`) caches detection (`CRAFT`) and recognition weights in project-relative `models/easyocr/` with `download_enabled=False`, reducing cold reader initialization from ~5 minutes to ~2.5 seconds.
+- **Multi-Model Free Vision Fallback Engine**: Configurable sequential failover chain across verified zero-cost multimodal models (`nvidia/nemotron-3.5-super-vl:free` → `google/gemma-4-31b-it:free` → `particle-ai/particle-1:free`) when the primary model encounters rate limits, timeouts (90s threshold), or availability drops.
+- **Strict Zero-Cost Guardrails (`ALLOW_PAID_MODELS=false`)**: Automatic programmatic validation rejects any model ID not ending in `:free`, guaranteeing zero unexpected API charges.
+- **Proactive OpenRouter Quota Monitoring**: Background service queries `GET /api/v1/key` with TTL caching (default 60s) to detect free-tier exhaustion before initiating network inference.
+- **Zero-Network Local OCR Heuristic Fallback**: Deterministic regex-based parser extracts merchant name, ISO dates, subtotal, tax, tip, total, and line items directly from EasyOCR text when all cloud models are unavailable or unconfigured.
+- **Database Schema Migration & Observability**: Seamless non-destructive SQLite migration adds `model_used`, `extraction_method` (`AI` vs `LOCAL_OCR`), `fallback_used`, `fallback_reason`, and `processing_duration_ms` to every receipt record.
+- **Frontend Observability Badges**: Visual indicators in the Streamlit UI display extraction method (`AI` vs `LOCAL_OCR`), model ID, fallback status, and end-to-end execution latency in milliseconds.
+
 ---
 
 ## 🏗️ System Architecture
@@ -28,36 +40,44 @@ An end-to-end receipt extraction application that ingests receipt images and PDF
 ```mermaid
 flowchart TD
     subgraph Frontend["Streamlit Frontend"]
-        Dashboard["Dashboard"]
-        Upload["Receipt Upload"]
-        History["Receipt History"]
+        Dashboard["Dashboard & Metrics"]
+        Upload["Receipt Upload & Preview"]
+        History["Receipt History & Inspector"]
     end
 
     subgraph Backend["FastAPI Backend"]
-        Routes["REST API Routes"]
-        FileProc["File Processing"]
+        Routes["REST API Routes (/upload, /receipts, /stats)"]
+        FileProc["File Validation & Preprocessing"]
     end
 
-    subgraph Engine["Hybrid Extraction Engine"]
-        EasyOCR["Local EasyOCR"]
-        VisionLLM["OpenRouter Vision LLM"]
+    subgraph OCR["Local OCR Engine"]
+        EasyOCR["EasyOCR Local Singleton (Cached Weights)"]
     end
 
-    JSON["Structured JSON Extraction"]
-    Validation["Pydantic and Business Validation"]
+    subgraph FallbackEngine["Resilient Extraction Engine"]
+        Quota["Quota & Auth Monitor"]
+        PrimaryAI["Primary Vision LLM (Nemotron 3.5 Free)"]
+        FallbackAI["Fallback Free Vision LLMs"]
+        LocalParser["Local OCR Heuristic Parser (Zero Network)"]
+    end
 
-    subgraph Database["SQLite Database"]
-        Receipts["Receipts Table"]
+    Validation["Pydantic & Business Logic Validation"]
+
+    subgraph Database["SQLite Database (receipts.db)"]
+        Receipts["Receipts Table (with Phase 2 Metadata)"]
         ReceiptItems["Receipt Items Table"]
     end
 
     Upload --> Routes
     Routes --> FileProc
     FileProc --> EasyOCR
-    FileProc --> VisionLLM
-    EasyOCR --> VisionLLM
-    VisionLLM --> JSON
-    JSON --> Validation
+    EasyOCR --> Quota
+    Quota --> PrimaryAI
+    PrimaryAI -- Timeout / Rate Limit --> FallbackAI
+    FallbackAI -- Outage / 401 / Quota --> LocalParser
+    PrimaryAI --> Validation
+    FallbackAI --> Validation
+    LocalParser --> Validation
     Validation --> Receipts
     Validation --> ReceiptItems
     Receipts --> Routes
@@ -74,16 +94,18 @@ flowchart TD
 |---|---|---|
 | **Frontend** | Streamlit (1.41.1) | Interactive dashboard, metrics visualization, and receipt upload UI |
 | **Backend** | FastAPI (0.115.6) & Uvicorn (0.34.0) | High-performance asynchronous REST API server |
-| **API Client** | HTTPX (0.28.1) | Resilient HTTP communications between frontend and backend |
-| **Local OCR** | EasyOCR (1.7.2) & PyTorch (2.15.0) | Offline optical character recognition for receipts |
-| **AI Inference** | OpenRouter Vision LLM API | Multimodal LLM reasoning on receipt imagery and OCR text |
+| **API Client** | HTTPX (0.28.1) | Resilient HTTP communications between frontend and backend (300s timeout) |
+| **Local OCR** | EasyOCR (1.7.2) & PyTorch (2.15.0) | Offline optical character recognition with locally cached models |
+| **Primary AI Inference** | `nvidia/nemotron-3.5-super-vl:free` | Multimodal Vision LLM reasoning on receipt imagery and OCR text |
+| **Fallback AI Inference** | `google/gemma-4-31b-it:free`, `particle-ai/particle-1:free` | Zero-cost secondary Vision LLMs for automatic failover |
+| **Local Fallback Parser** | Python Regex & Heuristics | Zero-network deterministic extraction directly from OCR text |
 | **Image Processing** | Pillow (11.1.0) | EXIF orientation normalization, resizing, and format conversion |
 | **PDF Processing** | PyMuPDF (1.25.3) | Vector PDF text extraction and high-DPI page rendering |
 | **Validation** | Pydantic (2.10.5) | Schema enforcement, type coercion, and business rule validation |
 | **Database** | SQLite 3 | Embedded zero-configuration local relational database |
-| **ORM** | SQLAlchemy (2.0.37) | Relational modeling, migrations, and transactional CRUD layer |
+| **ORM** | SQLAlchemy (2.0.37) | Relational modeling, schema migration, and transactional CRUD layer |
 | **Configuration** | python-dotenv (1.0.1) | Centralized 12-factor environment variable management |
-| **Testing** | Pytest (8.3.4) & pytest-asyncio | Comprehensive unit, service, integration, and API testing |
+| **Testing** | Pytest (8.3.4) & pytest-asyncio | Comprehensive unit, service, integration, and API testing (77 tests) |
 
 ---
 
@@ -95,12 +117,12 @@ Expense-Dispatcher-Agent-System/
 ├── frontend/
 │   ├── __init__.py
 │   ├── app.py                          # Streamlit application entry point
-│   ├── api_client.py                   # HTTPX API client connecting to FastAPI
+│   ├── api_client.py                   # HTTPX API client connecting to FastAPI (300s timeout)
 │   └── components/
 │       ├── __init__.py
 │       ├── upload.py                   # Upload widget and file preview component
-│       ├── receipt_display.py          # Results display, line item table, warnings
-│       └── receipt_history.py          # Historical receipts viewer and detail inspector
+│       ├── receipt_display.py          # Results display, line items, warnings, metadata badges
+│       └── receipt_history.py          # Historical receipts viewer, search, and latency inspector
 │
 ├── backend/
 │   ├── __init__.py
@@ -112,45 +134,57 @@ Expense-Dispatcher-Agent-System/
 │   │   ├── __init__.py
 │   │   ├── file_service.py             # File validation, MIME checks, unique disk storage
 │   │   ├── preprocessing_service.py    # Pillow image normalization & PyMuPDF page rendering
-│   │   ├── ocr_service.py              # EasyOCR local singleton text extractor
-│   │   ├── llm_service.py              # OpenRouter Vision API integration & backoff
-│   │   ├── extraction_service.py       # Full extraction pipeline orchestrator with retry
+│   │   ├── ocr_service.py              # EasyOCR local singleton with project model caching
+│   │   ├── llm_service.py              # OpenRouter Vision API integration, timeout, and backoff
+│   │   ├── quota_service.py            # OpenRouter key quota monitor with TTL caching (Phase 2)
+│   │   ├── model_fallback_service.py   # Multi-model AI fallback & local OCR coordinator (Phase 2)
+│   │   ├── local_receipt_parser.py     # Zero-network heuristic OCR text parser (Phase 2)
+│   │   ├── extraction_service.py       # Full extraction pipeline orchestrator with latency tracking
 │   │   └── validation_service.py       # Business logic validation & arithmetic consistency
 │   ├── database/
 │   │   ├── __init__.py
-│   │   ├── connection.py               # SQLAlchemy engine, session maker, DB init
-│   │   ├── models.py                   # ORM models (Receipt, ReceiptItem)
-│   │   └── repository.py               # Data access layer (CRUD and statistics queries)
+│   │   ├── connection.py               # SQLAlchemy engine, session maker, non-destructive migration
+│   │   ├── models.py                   # ORM models (Receipt, ReceiptItem) with Phase 2 columns
+│   │   └── repository.py               # Data access layer (CRUD, metadata persistence, stats)
 │   ├── schemas/
 │   │   ├── __init__.py
-│   │   └── receipt_schema.py           # Pydantic schemas, data sanitizers, response models
+│   │   └── receipt_schema.py           # Pydantic schemas, response models with Phase 2 fields
 │   ├── utils/
 │   │   ├── __init__.py
-│   │   ├── config.py                   # Centralized configuration loaded from .env
+│   │   ├── config.py                   # Centralized configuration with fallback model lists
 │   │   ├── logger.py                   # Standardized logging configuration
 │   │   └── exceptions.py               # Structured application domain exceptions
 │   └── uploads/                        # Uploaded receipts storage (gitignored)
 │       └── .gitkeep
 │
+├── models/
+│   └── easyocr/                        # Pre-cached EasyOCR weights (craft, english) (gitignored)
+│
 ├── tests/
 │   ├── __init__.py
 │   ├── test_api.py                     # API route & HTTP exception tests (9 tests)
-│   ├── test_database.py                # Database CRUD and aggregation tests (12 tests)
+│   ├── test_database.py                # Database CRUD, migration, and metadata tests (13 tests)
 │   ├── test_extraction.py              # OCR & LLM parsing/retry unit tests (10 tests)
-│   └── test_validation.py              # Pydantic schema & business rule tests (21 tests)
+│   ├── test_validation.py              # Pydantic schema & business rule tests (21 tests)
+│   ├── test_local_parser.py            # Local heuristic OCR text parser tests (8 tests, Phase 2)
+│   ├── test_quota.py                   # Quota monitoring & TTL caching tests (5 tests, Phase 2)
+│   ├── test_fallback.py                # Multi-model fallback coordinator tests (7 tests, Phase 2)
+│   └── test_model_setup.py             # EasyOCR model caching and setup tests (4 tests, Phase 2)
 │
 ├── Receipts/                           # Demonstration receipt images
 │   ├── Receipt 1.png                   # Original receipt: The Corner Bistro
-│   └── Receipt 2.png                   # Original receipt: Target Stores
+│   ├── Receipt 2.png                   # Original receipt: Target Stores
+│   └── Receipt 3.png                   # Original receipt: Quick-Mart Fuel
 │
 ├── Receipt Result/                     # Application extraction screenshots
 │   ├── Receipt1.png                    # Live extraction UI result: The Corner Bistro
 │   └── Receipt2.png                    # Live extraction UI result: Target Stores
 │
-├── .env.example                        # Template for environment variables
+├── .env.example                        # Template for environment variables (Phase 2 updated)
 ├── .gitignore                          # Git exclusion rules
 ├── pytest.ini                          # Pytest configuration
 ├── requirements.txt                    # Pinned project dependencies
+├── setup_models.py                     # Offline EasyOCR weight preparation script (Phase 2)
 ├── run.py                              # Unified application launcher (backend + frontend)
 └── README.md                           # Project documentation
 ```
@@ -179,9 +213,9 @@ Below are the original receipt inputs alongside their live extraction screenshot
 
 ## 🔍 Verified Live Extraction Results
 
-Both receipts were processed end-to-end through live inference, rigorously validated against business rules, and persisted in SQLite.
+All test receipts were processed end-to-end through live inference, rigorously validated against business rules, and persisted in SQLite.
 
-### Receipt 1 – THE CORNER BISTRO
+### Receipt 1 – THE CORNER BISTRO (Live Verified)
 
 - **Merchant Name**: `THE CORNER BISTRO`
 - **Receipt Date**: `2026-02-20`
@@ -195,11 +229,14 @@ Both receipts were processed end-to-end through live inference, rigorously valid
   - `Grilled Salmon` — `$48.00`
   - `Espresso` — `$3.50`
 - **Arithmetic Check**: $77.50 (subtotal) + $6.98 (tax) + $15.00 (tip) = $99.48 (exact match)
+- **Extraction Method**: `AI` (`nvidia/nemotron-3.5-super-vl:free`)
+- **Fallback Used**: `False`
+- **Processing Time**: `16.47s`
 - **Status**: `COMPLETED`
 
 ---
 
-### Receipt 2 – TARGET STORES
+### Receipt 2 – TARGET STORES (Live Verified)
 
 - **Merchant Name**: `TARGET STORES`
 - **Receipt Date**: `2026-02-18`
@@ -212,6 +249,8 @@ Both receipts were processed end-to-end through live inference, rigorously valid
   - `USB-C Cable 6ft` — `$12.50`
   - `Notebook 3-Pack` — `$8.99`
 - **Arithmetic Check**: $46.48 (subtotal) + $3.83 (tax) = $50.31 (exact match)
+- **Extraction Method**: `AI` (`nvidia/nemotron-3.5-super-vl:free`)
+- **Fallback Used**: `False`
 - **Status**: `COMPLETED`
 
 ---
@@ -246,7 +285,17 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-### 4. Configure Environment Variables
+### 4. Prepare EasyOCR Model Weights (Phase 2 Fast Startup)
+
+Run the model setup script to copy existing cached weights or pre-download them into the local project cache:
+
+```powershell
+python setup_models.py
+```
+
+This ensures EasyOCR initialization takes ~2.5 seconds instead of 4–5 minutes on first run, and runs 100% offline.
+
+### 5. Configure Environment Variables
 
 Create a local `.env` file by copying the template:
 
@@ -259,8 +308,20 @@ Edit `.env` with your actual settings (placeholders shown below):
 ```env
 # OpenRouter API Configuration
 OPENROUTER_API_KEY=your_openrouter_api_key_here
-OPENROUTER_MODEL=nvidia/nemotron-3.5-super-vl:free
+OPENROUTER_PRIMARY_MODEL=nvidia/nemotron-3.5-super-vl:free
+OPENROUTER_FALLBACK_MODELS=google/gemma-4-31b-it:free,particle-ai/particle-1:free
+ALLOW_PAID_MODELS=false
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_TIMEOUT=90.0
+
+# Backward compatibility alias
+OPENROUTER_MODEL=nvidia/nemotron-3.5-super-vl:free
+
+# Quota Monitoring
+QUOTA_CACHE_TTL_SECONDS=60
+
+# HTTP Communication Timeout
+HTTP_REQUEST_TIMEOUT=300.0
 
 # Database Configuration
 DATABASE_URL=sqlite:///./receipts.db
@@ -280,10 +341,6 @@ BACKEND_BASE_URL=http://127.0.0.1:8000
 ```
 
 > **Security Note**: Never commit your `.env` file containing actual API credentials. The `.gitignore` file is configured to keep it excluded.
-
-### 5. EasyOCR Model Preparation
-
-EasyOCR downloads its pretrained detection model (`CRAFT`) and English recognition model automatically during its first execution. These weights are cached locally in the user's home directory (`~/.EasyOCR/model/`) and reused on subsequent runs without additional downloads.
 
 ---
 
@@ -329,9 +386,9 @@ The FastAPI backend exposes the following RESTful routes:
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/health` | Health check endpoint returning `{ "status": "healthy", "service": "receipt-extractor" }` |
-| `POST` | `/upload` | Multipart form endpoint accepting receipt image/PDF; executes OCR + LLM and persists result |
-| `GET` | `/receipts` | Lists historical receipts ordered by creation date descending |
-| `GET` | `/receipts/{id}` | Fetches detailed receipt metadata, validation warnings, raw OCR text, and line items |
+| `POST` | `/upload` | Multipart form endpoint accepting receipt image/PDF; executes OCR + Fallback AI and persists result |
+| `GET` | `/receipts` | Lists historical receipts ordered by creation date descending with Phase 2 metadata |
+| `GET` | `/receipts/{id}` | Fetches detailed receipt metadata, validation warnings, raw OCR text, latency, and line items |
 | `DELETE` | `/receipts/{id}` | Deletes a receipt record and cascade-deletes all associated line items |
 | `GET` | `/stats` | Computes dashboard aggregate statistics (total receipts, expenses, success/review counts) |
 
@@ -339,8 +396,8 @@ The FastAPI backend exposes the following RESTful routes:
 
 ```json
 {
-  "id": 1,
-  "filename": "6a7ce0e997aa4be88e46eeb38ae24aa3.png",
+  "id": 5,
+  "filename": "e727cc16b13d44e7b1de0f16c28b60bd.png",
   "merchant_name": "THE CORNER BISTRO",
   "date": "2026-02-20",
   "line_items": [
@@ -356,7 +413,12 @@ The FastAPI backend exposes the following RESTful routes:
   "status": "COMPLETED",
   "warnings": [],
   "raw_ocr_text": "THE CORNER BISTRO Order #849 Table 12...",
-  "created_at": "2026-02-20T14:30:00"
+  "created_at": "2026-02-20T14:30:00",
+  "model_used": "nvidia/nemotron-3.5-super-vl:free",
+  "extraction_method": "AI",
+  "fallback_used": false,
+  "fallback_reason": null,
+  "processing_duration_ms": 16471
 }
 ```
 
@@ -364,7 +426,7 @@ The FastAPI backend exposes the following RESTful routes:
 
 ## 🗄️ Database Architecture
 
-The application persists data in SQLite via SQLAlchemy ORM models configured with foreign keys and cascade deletion.
+The application persists data in SQLite via SQLAlchemy ORM models configured with foreign keys, cascade deletion, and automatic non-destructive column migration.
 
 ```mermaid
 erDiagram
@@ -383,6 +445,11 @@ erDiagram
         string raw_ocr_text
         string status
         string created_at
+        string model_used
+        string extraction_method
+        boolean fallback_used
+        string fallback_reason
+        int processing_duration_ms
     }
     RECEIPT_ITEMS {
         int id PK
@@ -395,32 +462,41 @@ erDiagram
 - **Structured Columns**: Enables direct SQL querying and fast aggregations for metrics (`total_expenses`, `merchant_name`, `date`).
 - **Complete Extracted JSON**: Stores the full validated payload (`extracted_json`) ensuring zero data loss and forward schema compatibility.
 - **Raw OCR Text**: Preserves original extracted text (`raw_ocr_text`) for debugging, auditing, or future re-extraction.
+- **Execution Metadata (Phase 2)**: Tracks `model_used`, `extraction_method` (`AI` vs `LOCAL_OCR`), `fallback_used`, `fallback_reason`, and `processing_duration_ms` for production observability.
 - **Line Items Relational Table**: Normalizes line items into `receipt_items` linked to the primary receipt key.
 
 ---
 
 ## 🧪 Testing Suite
 
-Automated testing is configured via Pytest, covering unit validation, OCR response handling, LLM prompt formatting, database operations, and API routes. External LLM and OCR API calls are mocked in tests to guarantee fast, zero-cost, reproducible test execution.
+Automated testing is configured via Pytest, covering unit validation, OCR response handling, LLM prompt formatting, fallback coordinators, local parsers, quota monitors, database migrations, and API routes. External LLM and OCR API calls are mocked in tests to guarantee fast, zero-cost, reproducible test execution.
 
 ```powershell
 python -m pytest -v
 ```
 
-### Verified Test Results (52/52 Tests Passing)
+### Verified Test Results (77/77 Tests Passing)
 
 ```text
 tests/test_api.py .........                               [  9 passed ]
-tests/test_database.py ............                       [ 12 passed ]
+tests/test_database.py .............                      [ 13 passed ]
 tests/test_extraction.py ..........                       [ 10 passed ]
+tests/test_fallback.py .......                            [  7 passed ]
+tests/test_local_parser.py ........                       [  8 passed ]
+tests/test_model_setup.py ....                            [  4 passed ]
+tests/test_quota.py .....                                 [  5 passed ]
 tests/test_validation.py .....................            [ 21 passed ]
 
-======================= 52 passed, 20 warnings in 9.33s =======================
+======================= 77 passed, 21 warnings in 2.37s =======================
 ```
 
 - **API Tests (9)**: Verifies `/health`, valid image uploads, invalid MIME rejections, empty file handling, corrupted file detection, empty/populated history retrieval, and 404 responses.
-- **Database Tests (12)**: Verifies receipt insertion, nullable fields handling, failed record creation, cascade deletion, and dashboard metric calculations.
+- **Database Tests (13)**: Verifies receipt insertion, nullable fields handling, failed record creation, cascade deletion, schema migration, and metadata column persistence.
 - **Extraction Tests (10)**: Verifies LLM response JSON parsing, markdown code-fence stripping, OCR text parsing, auth error handling, and rate limit backoff.
+- **Model Setup Tests (4, Phase 2)**: Verifies local model weight existence checks, user cache reuse, and offline execution integrity.
+- **Quota Monitoring Tests (5, Phase 2)**: Verifies OpenRouter key validation, free-tier detection, usage limits, and TTL caching.
+- **Fallback Coordinator Tests (7, Phase 2)**: Verifies sequential primary-to-fallback transition, 401 fast failure, timeout handling, and automatic failover to local OCR.
+- **Local OCR Parser Tests (8, Phase 2)**: Verifies deterministic merchant detection, date formats (ISO, textual, slashed), subtotal/tax/tip/total extraction, and line item parsing without network access.
 - **Validation Tests (21)**: Verifies Pydantic schema validation, monetary string sanitization, ISO date conversions, arithmetic consistency checks, negative price flagging, and status determination (`COMPLETED` vs. `REVIEW_REQUIRED`).
 
 ---

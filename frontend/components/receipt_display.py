@@ -1,7 +1,8 @@
 """
 Receipt display component for the Streamlit frontend.
 
-Displays the extracted receipt information.
+Displays the extracted receipt information alongside Phase 2 metadata
+(extraction method, model used, fallback status, execution duration).
 """
 
 import streamlit as st
@@ -10,7 +11,7 @@ import pandas as pd
 
 def render_receipt_display(receipt: dict) -> None:
     """
-    Display the extracted receipt information.
+    Display the extracted receipt information and execution metadata.
 
     Args:
         receipt: Receipt data dict from the API.
@@ -29,7 +30,22 @@ def render_receipt_display(receipt: dict) -> None:
         "PROCESSING": "🔵",
     }
     status_icon = status_colors.get(status, "⚪")
-    st.markdown(f"**Status:** {status_icon} {status}")
+
+    # Metadata summary
+    method = receipt.get("extraction_method") or "AI"
+    model = receipt.get("model_used")
+    fallback = receipt.get("fallback_used", False)
+    duration_ms = receipt.get("processing_duration_ms")
+
+    meta_parts = [f"**Status:** {status_icon} {status}", f"**Method:** {method}"]
+    if model:
+        meta_parts.append(f"**Model:** `{model}`")
+    if fallback:
+        meta_parts.append("*(Fallback Used)*")
+    if duration_ms:
+        meta_parts.append(f"({duration_ms / 1000:.2f}s)")
+
+    st.markdown(" • ".join(meta_parts))
 
     # Main info in columns
     col1, col2 = st.columns(2)
@@ -65,6 +81,12 @@ def render_receipt_display(receipt: dict) -> None:
     else:
         st.info("No line items extracted.")
 
+    # Fallback reason info if applicable
+    fallback_reason = receipt.get("fallback_reason")
+    if fallback_reason:
+        with st.expander("ℹ️ Fallback Reason", expanded=False):
+            st.info(fallback_reason)
+
     # Warnings
     warnings = receipt.get("warnings", [])
     if warnings:
@@ -77,4 +99,3 @@ def render_receipt_display(receipt: dict) -> None:
     if raw_ocr:
         with st.expander("📝 Raw OCR Text", expanded=False):
             st.text(raw_ocr)
-

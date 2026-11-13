@@ -2,6 +2,7 @@
 Pydantic schemas for receipt data validation.
 
 Defines the structure for extraction results, API responses, and validation.
+Includes Phase 2 metadata fields for model and fallback observability.
 """
 
 from datetime import date, datetime
@@ -62,9 +63,7 @@ class ReceiptExtraction(BaseModel):
             except ValueError:
                 # Try common date formats
                 import re
-                # Remove extra whitespace
                 v = v.strip()
-                # Try MM/DD/YYYY
                 match = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", v)
                 if match:
                     m, d, y = match.groups()
@@ -112,6 +111,13 @@ class ReceiptResponse(BaseModel):
     raw_ocr_text: Optional[str] = None
     created_at: Optional[str] = None
 
+    # Phase 2 metadata
+    model_used: Optional[str] = None
+    extraction_method: Optional[str] = "AI"
+    fallback_used: Optional[bool] = False
+    fallback_reason: Optional[str] = None
+    processing_duration_ms: Optional[int] = None
+
     class Config:
         from_attributes = True
 
@@ -126,6 +132,11 @@ class ReceiptListItem(BaseModel):
     total_amount: Optional[float] = None
     status: str
     created_at: Optional[str] = None
+
+    # Phase 2 metadata
+    model_used: Optional[str] = None
+    extraction_method: Optional[str] = "AI"
+    fallback_used: Optional[bool] = False
 
     class Config:
         from_attributes = True
@@ -145,4 +156,3 @@ class ErrorResponse(BaseModel):
 
     detail: str
     status_code: int = 500
-

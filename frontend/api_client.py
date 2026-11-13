@@ -2,19 +2,20 @@
 Frontend API client module.
 
 Communicates with the FastAPI backend using HTTPX.
+Configurable timeouts aligned with Phase 2 requirements.
 """
 
+import os
 from typing import Optional
 import httpx
 
-# Default backend URL - can be overridden via environment
-BACKEND_BASE_URL = "http://127.0.0.1:8000"
-TIMEOUT = 120.0  # 2 minutes for receipt processing
+# Default backend URL and timeout - configurable via environment
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://127.0.0.1:8000")
+TIMEOUT = float(os.getenv("HTTP_REQUEST_TIMEOUT", "300.0"))  # Configurable 5 minutes
 
 
 def get_backend_url() -> str:
     """Get the backend base URL from environment or default."""
-    import os
     return os.getenv("BACKEND_BASE_URL", BACKEND_BASE_URL)
 
 
@@ -142,4 +143,3 @@ def check_backend_health() -> bool:
         return response.status_code == 200
     except Exception:
         return False
-

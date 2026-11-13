@@ -2,6 +2,7 @@
 Database ORM models.
 
 SQLAlchemy models for receipts and receipt line items.
+Includes Phase 2 execution metadata (model_used, extraction_method, fallback tracking).
 """
 
 from datetime import datetime, date
@@ -15,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     Numeric,
     Text,
+    Boolean,
     ForeignKey,
 )
 from sqlalchemy.orm import relationship
@@ -41,6 +43,13 @@ class Receipt(Base):
     status: str = Column(String(50), nullable=False, default="PROCESSING")
     created_at: datetime = Column(DateTime, nullable=False, default=datetime.utcnow)
 
+    # Phase 2 metadata
+    model_used: str | None = Column(String(100), nullable=True)
+    extraction_method: str | None = Column(String(50), nullable=True, default="AI")
+    fallback_used: bool = Column(Boolean, nullable=False, default=False)
+    fallback_reason: str | None = Column(Text, nullable=True)
+    processing_duration_ms: int | None = Column(Integer, nullable=True)
+
     # Relationship to line items
     line_items = relationship(
         "ReceiptItem",
@@ -50,7 +59,10 @@ class Receipt(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Receipt(id={self.id}, merchant='{self.merchant_name}', total={self.total_amount})>"
+        return (
+            f"<Receipt(id={self.id}, merchant='{self.merchant_name}', "
+            f"total={self.total_amount}, method='{self.extraction_method}')>"
+        )
 
 
 class ReceiptItem(Base):
@@ -68,4 +80,3 @@ class ReceiptItem(Base):
 
     def __repr__(self) -> str:
         return f"<ReceiptItem(id={self.id}, name='{self.item_name}', price={self.price})>"
-

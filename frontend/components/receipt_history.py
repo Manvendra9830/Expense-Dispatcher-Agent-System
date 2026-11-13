@@ -1,7 +1,7 @@
 """
 Receipt history component for the Streamlit frontend.
 
-Displays the list of previously processed receipts.
+Displays the list of previously processed receipts including Phase 2 metadata.
 """
 
 import streamlit as st
@@ -29,12 +29,17 @@ def render_receipt_history() -> None:
     # Build history table
     history_data = []
     for r in receipts:
+        method_str = r.get("extraction_method") or "AI"
+        if r.get("fallback_used"):
+            method_str += " (Fallback)"
+
         history_data.append({
             "ID": r["id"],
             "Filename": r["filename"],
             "Merchant": r.get("merchant_name", "N/A"),
             "Date": r.get("date", "N/A"),
             "Total": f"${r['total_amount']:.2f}" if r.get("total_amount") is not None else "N/A",
+            "Method": method_str,
             "Status": r.get("status", "UNKNOWN"),
             "Created": r.get("created_at", "N/A"),
         })
@@ -49,7 +54,7 @@ def render_receipt_history() -> None:
         selected_id = st.selectbox(
             "Select a receipt to view details:",
             options=receipt_ids,
-            format_func=lambda x: f"Receipt #{x} - {next((r.get('merchant_name', r['filename']) for r in receipts if r['id'] == x), 'Unknown')}",
+            format_func=lambda x: f"Receipt #{x} - {next((r.get('merchant_name') or r['filename'] for r in receipts if r['id'] == x), 'Unknown')}",
         )
 
         if selected_id and st.button("📖 View Full Details"):
@@ -64,4 +69,3 @@ def render_receipt_history() -> None:
         from frontend.components.receipt_display import render_receipt_display
         st.markdown("---")
         render_receipt_display(st.session_state["selected_receipt"])
-

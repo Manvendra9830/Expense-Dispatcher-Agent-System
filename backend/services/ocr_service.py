@@ -2,8 +2,11 @@
 OCR service module.
 
 EasyOCR integration for local text extraction from receipt images.
+Uses persistent caching in 'models/easyocr/' with runtime downloads disabled.
 """
 
+import time
+from pathlib import Path
 import numpy as np
 from PIL import Image
 
@@ -16,20 +19,63 @@ logger = get_logger(__name__)
 # Module-level OCR reader (singleton)
 _reader = None
 
+REQUIRED_MODELS = [
+    "craft_mlt_25k.pth",
+    "english_g2.pth",
+]
+
+
+def _check_cached_models_exist() -> bool:
+    """Check if required EasyOCR model files are present in the configured directory."""
+    model_dir = settings.EASYOCR_MODEL_DIR
+    if not model_dir.exists():
+        return False
+    for m in REQUIRED_MODELS:
+        file_path = model_dir / m
+        if not file_path.is_file() or file_path.stat().st_size == 0:
+            return False
+    return True
+
 
 def _get_reader():
-    """Get or initialize the EasyOCR reader (singleton pattern)."""
+    """
+    Get or initialize the EasyOCR reader (singleton pattern).
+    Uses local cached weights and disallows runtime network downloads.
+    """
     global _reader
     if _reader is None:
         try:
             import easyocr
+
+            model_dir = settings.EASYOCR_MODEL_DIR
             languages = [settings.OCR_LANGUAGE]
-            logger.info(f"Initializing EasyOCR with languages: {languages}")
-            _reader = easyocr.Reader(languages, gpu=False)
-            logger.info("EasyOCR reader initialized successfully.")
+
+            if not _check_cached_models_exist():
+                logger.warning(
+                    f"Required EasyOCR models missing from {model_dir}. "
+                    "Please run 'python setup_models.py' to prepare offline model weights."
+                )
+
+            logger.info(
+                f"Initializing EasyOCR reader (languages: {languages}, "
+                f"storage: {model_dir}, download_enabled: False)..."
+            )
+            t0 = time.perf_counter()
+            _reader = easyocr.Reader(
+                languages,
+                gpu=False,
+                model_storage_directory=str(model_dir),
+                download_enabled=False,
+                verbose=False,
+            )
+            init_duration = time.perf_counter() - t0
+            logger.info(f"EasyOCR reader initialized successfully in {init_duration:.2f}s.")
         except Exception as e:
             logger.error(f"Failed to initialize EasyOCR: {e}")
-            raise OCRError(f"Failed to initialize OCR engine: {str(e)}")
+            raise OCRError(
+                f"Failed to initialize OCR engine: {str(e)}. "
+                "Ensure models are downloaded by running 'python setup_models.py'."
+            )
     return _reader
 
 
@@ -47,6 +93,7 @@ def extract_text_from_image(image: Image.Image) -> str:
         OCRError: If text extraction fails.
     """
     try:
+        t0 = time.perf_counter()
         reader = _get_reader()
 
         # Convert PIL Image to numpy array
@@ -57,12 +104,15 @@ def extract_text_from_image(image: Image.Image) -> str:
 
         # Join all detected text
         text = "\n".join(results)
+        duration = time.perf_counter() - t0
 
         if not text.strip():
-            logger.warning("OCR produced no text from the image.")
+            logger.warning(f"OCR produced no text from the image ({duration:.2f}s).")
             return ""
 
-        logger.info(f"OCR extracted {len(text)} characters from image.")
+        logger.info(
+            f"OCR extracted {len(text)} characters from image in {duration:.2f}s."
+        )
         return text
 
     except OCRError:
@@ -128,4 +178,3 @@ def combine_page_texts(pages: list[dict]) -> str:
             parts.append(f"--- Page {page['page_num']} ---\n{text}")
 
     return "\n\n".join(parts)
-
