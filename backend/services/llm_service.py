@@ -52,7 +52,11 @@ Rules:
 - Use the original image to cross-check OCR.
 - Flag uncertain information.
 - Do not fabricate values to make arithmetic consistent.
-- Use ISO date format YYYY-MM-DD when confidently interpretable.
+- Extract the date exactly as printed on the receipt and normalize to ISO format YYYY-MM-DD if interpretable; otherwise use null.
+- Do not compare the receipt date with today's date or the current date.
+- Do not evaluate or decide whether the receipt date is in the past or future.
+- Never generate warnings merely because a receipt date appears to be in the future.
+- Never invent or estimate a missing receipt date; if the date is unclear or missing, return null.
 
 Return ONLY a valid JSON object in this exact format (no markdown, no code fences):
 {

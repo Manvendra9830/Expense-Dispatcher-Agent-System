@@ -115,3 +115,4 @@ class TestQuotaService:
             res2 = check_quota(force_refresh=False)
             assert res2.cached is True
             assert res2.usage == 5.0
+

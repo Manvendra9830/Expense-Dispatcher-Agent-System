@@ -164,3 +164,4 @@ def is_account_quota_exhausted() -> bool:
         return False
     quota = check_quota()
     return quota.is_exhausted
+

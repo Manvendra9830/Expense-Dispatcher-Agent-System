@@ -156,8 +156,8 @@ def process_receipt(
         )
         raise
 
-    # Step 6: Business validation
-    extraction = validate_extraction(extraction)
+    # Step 6: Business validation & OCR discrepancy detection
+    extraction = validate_extraction(extraction, ocr_text=ocr_text)
     status = determine_status(extraction)
 
     # Enforce REVIEW_REQUIRED if local parser was used and any warnings are present

@@ -56,3 +56,4 @@ class TestModelSetupAndCaching:
         }
         ret = setup()
         assert ret == 0
+

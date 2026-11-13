@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from backend.schemas.receipt_schema import ReceiptExtraction
+from backend.services.discrepancy_service import detect_discrepancies
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -16,18 +17,23 @@ logger = get_logger(__name__)
 TOLERANCE = Decimal("0.50")
 
 
-def validate_extraction(extraction: ReceiptExtraction) -> ReceiptExtraction:
+def validate_extraction(
+    extraction: ReceiptExtraction,
+    ocr_text: Optional[str] = None,
+) -> ReceiptExtraction:
     """
     Apply business validation rules to an extraction result.
 
     Checks:
+    - Missing critical fields (merchant, date, total).
     - Negative amounts.
     - Subtotal + tax + tip ≈ total consistency.
-    - Missing critical fields.
     - Line item sum vs subtotal.
+    - Programmatic OCR vs LLM monetary discrepancies.
 
     Args:
         extraction: Pydantic-validated extraction result.
+        ocr_text: Optional raw EasyOCR text for cross-validation discrepancy checking.
 
     Returns:
         The extraction with any new warnings appended.
@@ -117,6 +123,11 @@ def validate_extraction(extraction: ReceiptExtraction) -> ReceiptExtraction:
     if not extraction.line_items:
         warnings.append("No line items were extracted.")
 
+    # Cross-check OCR text against structured extraction for monetary discrepancies
+    if ocr_text:
+        discrepancies = detect_discrepancies(ocr_text, extraction)
+        warnings.extend(discrepancies)
+
     # Update the extraction with new warnings
     extraction.warnings = warnings
 
@@ -138,7 +149,11 @@ def determine_status(extraction: ReceiptExtraction) -> str:
     Returns:
         Status string: COMPLETED or REVIEW_REQUIRED.
     """
-    # Count critical issues
+    # Missing, unparseable, or invalid receipt date requires manual review
+    if not extraction.date:
+        return "REVIEW_REQUIRED"
+
+    # Count critical missing fields
     critical_missing = 0
     if not extraction.merchant_name:
         critical_missing += 1
@@ -151,8 +166,8 @@ def determine_status(extraction: ReceiptExtraction) -> str:
     if critical_missing >= 2:
         return "REVIEW_REQUIRED"
 
-    # Check if there are concerning warnings
-    concerning_keywords = ["negative", "invalid", "not a valid"]
+    # Check if there are concerning warnings (negative amounts, invalid values, OCR discrepancies)
+    concerning_keywords = ["negative", "invalid", "not a valid", "discrepancy"]
     for warning in extraction.warnings:
         for keyword in concerning_keywords:
             if keyword in warning.lower():

@@ -57,19 +57,27 @@ class ReceiptExtraction(BaseModel):
         if v is None or v == "" or v == "null":
             return None
         if isinstance(v, str):
+            v_stripped = v.strip()
             try:
-                date.fromisoformat(v)
-                return v
+                date.fromisoformat(v_stripped)
+                return v_stripped
             except ValueError:
-                # Try common date formats
+                # Try common numeric slashed format MM/DD/YYYY
                 import re
-                v = v.strip()
-                match = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", v)
+                match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", v_stripped)
                 if match:
                     m, d, y = match.groups()
                     try:
                         parsed = date(int(y), int(m), int(d))
                         return parsed.isoformat()
+                    except ValueError:
+                        return None
+
+                # Try common textual month formats (e.g. Feb 20, 2026 or February 20 2026)
+                for fmt in ("%b %d, %Y", "%b %d %Y", "%B %d, %Y", "%B %d %Y"):
+                    try:
+                        dt = datetime.strptime(v_stripped, fmt)
+                        return dt.date().isoformat()
                     except ValueError:
                         pass
                 return None

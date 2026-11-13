@@ -151,3 +151,4 @@ class TestModelFallbackService:
             assert result.extraction_method == "LOCAL_OCR"
             assert result.fallback_used is True
             assert "401 Unauthorized" in (result.fallback_reason or "")
+

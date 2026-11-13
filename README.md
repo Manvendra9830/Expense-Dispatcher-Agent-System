@@ -1,12 +1,12 @@
 # 🧾 Expense Dispatcher Agent System
 
-**Part 1: AI-Powered Receipt Extraction System (Phase 1 & Phase 2 Enhanced)**
+**Part 1: AI-Powered Receipt Extraction System (Phase 1, Phase 2 & Phase 2.1 Complete)**
 
-An end-to-end receipt extraction application that ingests receipt images and PDFs, processes them via local OCR (EasyOCR) and a Vision Large Language Model (OpenRouter), validates the extracted data using strict Pydantic schemas and business logic rules, stores the structured records in a local SQLite database, and presents actionable insights through a Streamlit dashboard.
+An end-to-end receipt extraction application that ingests receipt images and PDFs, processes them via local OCR (EasyOCR) and a Vision Large Language Model (OpenRouter), cross-checks values using programmatic discrepancy detection, validates the extracted data using strict Pydantic schemas and business logic rules, stores the structured records in a local SQLite database, and presents actionable insights through a Streamlit dashboard.
 
-Phase 2 introduces **performance optimizations, persistent model caching, proactive quota monitoring, multi-model free Vision LLM fallback, and a zero-network local OCR fallback parser** to guarantee resilient zero-cost extraction under all network and API conditions.
+Phase 2 and Phase 2.1 introduce **performance optimizations, persistent model caching, proactive quota monitoring, multi-model free Vision LLM fallback, zero-network local OCR fallback, programmatic OCR vs. LLM monetary discrepancy detection, and date validation integrity** to guarantee resilient zero-cost extraction under all network and API conditions.
 
-> **Note on Architecture Roadmap**: This repository represents **Part 1 (Receipt Extraction System)** of the overall Expense Dispatcher Agent System. Part 2 will introduce an autonomous Multi-Agent Expense Dispatcher (Expense Agent, Summary Agent, Excel Recipient Reader, and Email Dispatcher) without requiring major structural changes to this foundational pipeline.
+> **Note on Architecture Roadmap**: This repository represents **Part 1 (Receipt Extraction System)** of the overall Expense Dispatcher Agent System. Part 2 will introduce an autonomous Multi-Agent Expense Dispatcher (Expense Agent, Summary Agent, Excel Recipient Reader, and Email Dispatcher) without requiring structural changes to this foundational pipeline.
 
 ---
 
@@ -26,12 +26,20 @@ Phase 2 introduces **performance optimizations, persistent model caching, proact
 
 ### Phase 2 Reliability & Performance Enhancements
 - **Persistent Local EasyOCR Caching**: Pre-download utility (`setup_models.py`) caches detection (`CRAFT`) and recognition weights in project-relative `models/easyocr/` with `download_enabled=False`, reducing cold reader initialization from ~5 minutes to ~2.5 seconds.
+- **Offline Runtime OCR**: EasyOCR executes 100% offline without attempting any network downloads during application runtime.
 - **Multi-Model Free Vision Fallback Engine**: Configurable sequential failover chain across verified zero-cost multimodal models (`nvidia/nemotron-3.5-super-vl:free` → `google/gemma-4-31b-it:free` → `particle-ai/particle-1:free`) when the primary model encounters rate limits, timeouts (90s threshold), or availability drops.
 - **Strict Zero-Cost Guardrails (`ALLOW_PAID_MODELS=false`)**: Automatic programmatic validation rejects any model ID not ending in `:free`, guaranteeing zero unexpected API charges.
 - **Proactive OpenRouter Quota Monitoring**: Background service queries `GET /api/v1/key` with TTL caching (default 60s) to detect free-tier exhaustion before initiating network inference.
 - **Zero-Network Local OCR Heuristic Fallback**: Deterministic regex-based parser extracts merchant name, ISO dates, subtotal, tax, tip, total, and line items directly from EasyOCR text when all cloud models are unavailable or unconfigured.
 - **Database Schema Migration & Observability**: Seamless non-destructive SQLite migration adds `model_used`, `extraction_method` (`AI` vs `LOCAL_OCR`), `fallback_used`, `fallback_reason`, and `processing_duration_ms` to every receipt record.
 - **Frontend Observability Badges**: Visual indicators in the Streamlit UI display extraction method (`AI` vs `LOCAL_OCR`), model ID, fallback status, and end-to-end execution latency in milliseconds.
+
+### Phase 2.1 Discrepancy Detection & Date Integrity
+- **Receipt Date Extraction Without Past/Future Judgment**: Prompt explicitly bounds the LLM to extract dates exactly as printed without judging whether they are in the past or future, eliminating false warnings on valid receipts.
+- **Strict Date Validation**: Missing, unparseable, or impossible calendar dates (e.g. `2026-02-31`) strictly enforce `REVIEW_REQUIRED` without fabricating dates. Textual dates (`Feb 20, 2026`) normalize cleanly to ISO `2026-02-20`.
+- **Programmatic OCR vs. LLM Discrepancy Detection**: Modular service (`discrepancy_service.py`) independently compares confident monetary fields from OCR against LLM structured outputs with a $0.05 tolerance.
+- **Automatic Manual Review on Discrepancies**: Confirmed monetary differences on critical fields (Total, Subtotal, Tax, Tip, Line Items) flag descriptive warnings and assign `REVIEW_REQUIRED`.
+- **Conservative Discrepancy Matching**: Prevents false alarms on noisy OCR, missing optional fields, or formatting variations (currency symbols, commas) while requiring zero additional AI API calls.
 
 ---
 
@@ -51,17 +59,20 @@ flowchart TD
     end
 
     subgraph OCR["Local OCR Engine"]
-        EasyOCR["EasyOCR Local Singleton (Cached Weights)"]
+        EasyOCR["EasyOCR Local Singleton (Cached Weights, Offline)"]
     end
 
     subgraph FallbackEngine["Resilient Extraction Engine"]
         Quota["Quota & Auth Monitor"]
         PrimaryAI["Primary Vision LLM (Nemotron 3.5 Free)"]
-        FallbackAI["Fallback Free Vision LLMs"]
+        FallbackAI["Fallback Free Vision LLMs (Gemma, Particle)"]
         LocalParser["Local OCR Heuristic Parser (Zero Network)"]
     end
 
-    Validation["Pydantic & Business Logic Validation"]
+    subgraph ValidationEngine["Validation & Audit Layer"]
+        Discrepancy["Programmatic OCR vs LLM Discrepancy Detection"]
+        Validation["Pydantic Schemas & Business Logic Validation"]
+    end
 
     subgraph Database["SQLite Database (receipts.db)"]
         Receipts["Receipts Table (with Phase 2 Metadata)"]
@@ -75,8 +86,10 @@ flowchart TD
     Quota --> PrimaryAI
     PrimaryAI -- Timeout / Rate Limit --> FallbackAI
     FallbackAI -- Outage / 401 / Quota --> LocalParser
-    PrimaryAI --> Validation
-    FallbackAI --> Validation
+    PrimaryAI --> Discrepancy
+    FallbackAI --> Discrepancy
+    EasyOCR --> Discrepancy
+    Discrepancy --> Validation
     LocalParser --> Validation
     Validation --> Receipts
     Validation --> ReceiptItems
@@ -99,13 +112,14 @@ flowchart TD
 | **Primary AI Inference** | `nvidia/nemotron-3.5-super-vl:free` | Multimodal Vision LLM reasoning on receipt imagery and OCR text |
 | **Fallback AI Inference** | `google/gemma-4-31b-it:free`, `particle-ai/particle-1:free` | Zero-cost secondary Vision LLMs for automatic failover |
 | **Local Fallback Parser** | Python Regex & Heuristics | Zero-network deterministic extraction directly from OCR text |
+| **Discrepancy Detection** | Python Decimal & Regex | Programmatic monetary cross-validation between OCR and LLM outputs |
 | **Image Processing** | Pillow (11.1.0) | EXIF orientation normalization, resizing, and format conversion |
 | **PDF Processing** | PyMuPDF (1.25.3) | Vector PDF text extraction and high-DPI page rendering |
-| **Validation** | Pydantic (2.10.5) | Schema enforcement, type coercion, and business rule validation |
+| **Validation** | Pydantic (2.10.5) | Schema enforcement, date normalization, and business rule validation |
 | **Database** | SQLite 3 | Embedded zero-configuration local relational database |
 | **ORM** | SQLAlchemy (2.0.37) | Relational modeling, schema migration, and transactional CRUD layer |
 | **Configuration** | python-dotenv (1.0.1) | Centralized 12-factor environment variable management |
-| **Testing** | Pytest (8.3.4) & pytest-asyncio | Comprehensive unit, service, integration, and API testing (77 tests) |
+| **Testing** | Pytest (8.3.4) & pytest-asyncio | Comprehensive testing suite with 99 passing automated tests |
 
 ---
 
@@ -139,8 +153,9 @@ Expense-Dispatcher-Agent-System/
 │   │   ├── quota_service.py            # OpenRouter key quota monitor with TTL caching (Phase 2)
 │   │   ├── model_fallback_service.py   # Multi-model AI fallback & local OCR coordinator (Phase 2)
 │   │   ├── local_receipt_parser.py     # Zero-network heuristic OCR text parser (Phase 2)
+│   │   ├── discrepancy_service.py      # Programmatic OCR vs LLM discrepancy detector (Phase 2.1)
 │   │   ├── extraction_service.py       # Full extraction pipeline orchestrator with latency tracking
-│   │   └── validation_service.py       # Business logic validation & arithmetic consistency
+│   │   └── validation_service.py       # Business logic validation & status determination (Phase 2.1)
 │   ├── database/
 │   │   ├── __init__.py
 │   │   ├── connection.py               # SQLAlchemy engine, session maker, non-destructive migration
@@ -148,7 +163,7 @@ Expense-Dispatcher-Agent-System/
 │   │   └── repository.py               # Data access layer (CRUD, metadata persistence, stats)
 │   ├── schemas/
 │   │   ├── __init__.py
-│   │   └── receipt_schema.py           # Pydantic schemas, response models with Phase 2 fields
+│   │   └── receipt_schema.py           # Pydantic schemas, date normalizer, Phase 2 metadata
 │   ├── utils/
 │   │   ├── __init__.py
 │   │   ├── config.py                   # Centralized configuration with fallback model lists
@@ -163,13 +178,15 @@ Expense-Dispatcher-Agent-System/
 ├── tests/
 │   ├── __init__.py
 │   ├── test_api.py                     # API route & HTTP exception tests (9 tests)
-│   ├── test_database.py                # Database CRUD, migration, and metadata tests (13 tests)
+│   ├── test_database.py                # Database CRUD, migration, and metadata tests (14 tests)
+│   ├── test_date_handling.py           # Date extraction, normalization & status tests (12 tests, Phase 2.1)
+│   ├── test_discrepancy.py             # OCR vs LLM monetary discrepancy tests (10 tests, Phase 2.1)
 │   ├── test_extraction.py              # OCR & LLM parsing/retry unit tests (10 tests)
-│   ├── test_validation.py              # Pydantic schema & business rule tests (21 tests)
-│   ├── test_local_parser.py            # Local heuristic OCR text parser tests (8 tests, Phase 2)
-│   ├── test_quota.py                   # Quota monitoring & TTL caching tests (5 tests, Phase 2)
-│   ├── test_fallback.py                # Multi-model fallback coordinator tests (7 tests, Phase 2)
-│   └── test_model_setup.py             # EasyOCR model caching and setup tests (4 tests, Phase 2)
+│   ├── test_fallback.py                # Multi-model fallback coordinator tests (4 tests)
+│   ├── test_local_parser.py            # Local heuristic OCR text parser tests (10 tests)
+│   ├── test_model_setup.py             # EasyOCR model caching and setup tests (4 tests)
+│   ├── test_quota.py                   # Quota monitoring & TTL caching tests (5 tests)
+│   └── test_validation.py              # Pydantic schema & business rule tests (21 tests)
 │
 ├── Receipts/                           # Demonstration receipt images
 │   ├── Receipt 1.png                   # Original receipt: The Corner Bistro
@@ -242,7 +259,7 @@ All test receipts were processed end-to-end through live inference, rigorously v
 - **Receipt Date**: `2026-02-18`
 - **Subtotal**: `$46.48`
 - **Tax**: `$3.83`
-- **Tip**: *Not specified* (`null`)
+- **Tip**: *Not specified* (`null` — correctly omitted without fabrication)
 - **Total Amount**: `$50.31`
 - **Extracted Line Items**:
   - `Wireless Mouse` — `$24.99`
@@ -285,7 +302,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-### 4. Prepare EasyOCR Model Weights (Phase 2 Fast Startup)
+### 4. Prepare EasyOCR Model Weights (Offline Setup)
 
 Run the model setup script to copy existing cached weights or pre-download them into the local project cache:
 
@@ -293,7 +310,7 @@ Run the model setup script to copy existing cached weights or pre-download them 
 python setup_models.py
 ```
 
-This ensures EasyOCR initialization takes ~2.5 seconds instead of 4–5 minutes on first run, and runs 100% offline.
+> **Important**: EasyOCR weights (`craft_mlt_25k.pth` and `english_g2.pth`) are prepared during this setup step, **not** during normal application runtime. Once prepared, the application initializes EasyOCR in ~2.5 seconds and runs 100% offline without network downloads.
 
 ### 5. Configure Environment Variables
 
@@ -306,7 +323,7 @@ copy .env.example .env
 Edit `.env` with your actual settings (placeholders shown below):
 
 ```env
-# OpenRouter API Configuration
+# OpenRouter Free AI API Configuration
 OPENROUTER_API_KEY=your_openrouter_api_key_here
 OPENROUTER_PRIMARY_MODEL=nvidia/nemotron-3.5-super-vl:free
 OPENROUTER_FALLBACK_MODELS=google/gemma-4-31b-it:free,particle-ai/particle-1:free
@@ -469,34 +486,44 @@ erDiagram
 
 ## 🧪 Testing Suite
 
-Automated testing is configured via Pytest, covering unit validation, OCR response handling, LLM prompt formatting, fallback coordinators, local parsers, quota monitors, database migrations, and API routes. External LLM and OCR API calls are mocked in tests to guarantee fast, zero-cost, reproducible test execution.
+Automated testing is configured via Pytest, covering unit validation, OCR response handling, LLM prompt formatting, fallback coordinators, local parsers, quota monitors, discrepancy detection, date normalization, database migrations, and API routes. External LLM and OCR API calls are mocked in tests to guarantee fast, zero-cost, reproducible test execution.
 
 ```powershell
 python -m pytest -v
 ```
 
-### Verified Test Results (77/77 Tests Passing)
+### Test Progression Across Project Phases
+
+- **Phase 1 Baseline**: 52 tests passing.
+- **Phase 2 Implementation**: 77 tests passing (+25 tests for fallback, local parser, quota, model setup).
+- **Phase 2.1 Refinements**: **99 tests passing** (+22 tests for discrepancy detection, date extraction, and validation).
+
+### Latest Test Results (99/99 Tests Passing)
 
 ```text
 tests/test_api.py .........                               [  9 passed ]
-tests/test_database.py .............                      [ 13 passed ]
+tests/test_database.py ..............                     [ 14 passed ]
+tests/test_date_handling.py ............                  [ 12 passed ]
+tests/test_discrepancy.py ..........                      [ 10 passed ]
 tests/test_extraction.py ..........                       [ 10 passed ]
-tests/test_fallback.py .......                            [  7 passed ]
-tests/test_local_parser.py ........                       [  8 passed ]
+tests/test_fallback.py ....                               [  4 passed ]
+tests/test_local_parser.py ..........                     [ 10 passed ]
 tests/test_model_setup.py ....                            [  4 passed ]
 tests/test_quota.py .....                                 [  5 passed ]
 tests/test_validation.py .....................            [ 21 passed ]
 
-======================= 77 passed, 21 warnings in 2.37s =======================
+======================= 99 passed, 21 warnings in 2.45s =======================
 ```
 
 - **API Tests (9)**: Verifies `/health`, valid image uploads, invalid MIME rejections, empty file handling, corrupted file detection, empty/populated history retrieval, and 404 responses.
-- **Database Tests (13)**: Verifies receipt insertion, nullable fields handling, failed record creation, cascade deletion, schema migration, and metadata column persistence.
+- **Database Tests (14)**: Verifies receipt insertion, nullable fields handling, failed record creation, cascade deletion, schema migration, and metadata column persistence.
+- **Date Handling Tests (12, Phase 2.1)**: Verifies exact date extraction without future-date bias, ISO formatting, textual month parsing, missing date handling, and enforcement of `REVIEW_REQUIRED` for invalid/impossible calendar dates.
+- **Discrepancy Detection Tests (10, Phase 2.1)**: Verifies matching OCR and LLM totals, discrepancy flagging on totals, subtotals, taxes, tips, and line items, avoidance of false alarms on formatting/ambiguity, and zero extra AI API calls.
 - **Extraction Tests (10)**: Verifies LLM response JSON parsing, markdown code-fence stripping, OCR text parsing, auth error handling, and rate limit backoff.
-- **Model Setup Tests (4, Phase 2)**: Verifies local model weight existence checks, user cache reuse, and offline execution integrity.
-- **Quota Monitoring Tests (5, Phase 2)**: Verifies OpenRouter key validation, free-tier detection, usage limits, and TTL caching.
-- **Fallback Coordinator Tests (7, Phase 2)**: Verifies sequential primary-to-fallback transition, 401 fast failure, timeout handling, and automatic failover to local OCR.
-- **Local OCR Parser Tests (8, Phase 2)**: Verifies deterministic merchant detection, date formats (ISO, textual, slashed), subtotal/tax/tip/total extraction, and line item parsing without network access.
+- **Model Setup Tests (4)**: Verifies local model weight existence checks, user cache reuse, and offline execution integrity.
+- **Quota Monitoring Tests (5)**: Verifies OpenRouter key validation, free-tier detection, usage limits, and TTL caching.
+- **Fallback Coordinator Tests (4)**: Verifies sequential primary-to-fallback transition, 401 fast failure, timeout handling, and automatic failover to local OCR.
+- **Local OCR Parser Tests (10)**: Verifies deterministic merchant detection, date formats (ISO, textual, slashed), subtotal/tax/tip/total extraction, and line item parsing without network access.
 - **Validation Tests (21)**: Verifies Pydantic schema validation, monetary string sanitization, ISO date conversions, arithmetic consistency checks, negative price flagging, and status determination (`COMPLETED` vs. `REVIEW_REQUIRED`).
 
 ---
@@ -509,6 +536,8 @@ The Part 1 architecture has been designed from the ground up to allow seamless i
 - **Summary & Analytics Agent**: Synthesizes periodic executive expense reports, budget trend alerts, and policy compliance summaries.
 - **Excel Recipient Reader**: Reads recipient distribution lists and department budget mappings from Excel workbooks.
 - **Email Dispatcher**: Connects to SMTP/Gmail services to distribute approved expense summaries and receipt attachments to stakeholders.
+
+> **Status**: Part 1 (including Phase 2 & 2.1 reliability enhancements) is fully implemented and operational. Part 2 multi-agent dispatching remains planned for a future phase.
 
 ---
 

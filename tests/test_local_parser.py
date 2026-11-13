@@ -110,3 +110,4 @@ Total Amount: 50.31"""
         assert result.tip is None
         assert result.total_amount is None
         assert len(result.line_items) == 0
+

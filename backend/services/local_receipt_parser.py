@@ -198,3 +198,4 @@ def parse_receipt_text_locally(raw_text: str) -> ReceiptExtraction:
         f"items={len(line_items)}, total={total_amount}"
     )
     return extraction
+

@@ -193,3 +193,4 @@ def extract_with_fallback(
         fallback_used=True,
         fallback_reason=combined_reasons,
     )
+
